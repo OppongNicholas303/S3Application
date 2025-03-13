@@ -1,0 +1,86 @@
+/* General Styles */
+body {
+    background-color: #f8f9fa;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* Card Styles */
+.card {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.15);
+}
+
+.card-header {
+    font-weight: 600;
+}
+
+/* Image Cards */
+.image-card .card-img-container {
+    height: 200px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #f5f5f5;
+}
+
+.image-card img {
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.image-card .card-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.image-card .card-text {
+    font-size: 0.8rem;
+}
+
+/* Pagination */
+.pagination .page-item.active .page-link {
+    background-color: #343a40;
+    border-color: #343a40;
+}
+
+.pagination .page-link {
+    color: #343a40;
+}
+
+/* Upload Form */
+#preview {
+    margin-top: 15px;
+    padding: 10px;
+    border: 1px dashed #ccc;
+    border-radius: 5px;
+    text-align: center;
+}
+
+/* Animation for Image Cards */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+#imageGallery .col-md-4 {
+    animation: fadeIn 0.5s ease-out forwards;
+}
+
+#imageGallery .col-md-4:nth-child(2) { animation-delay: 0.1s; }
+#imageGallery .col-md-4:nth-child(3) { animation-delay: 0.2s; }
+#imageGallery .col-md-4:nth-child(4) { animation-delay: 0.3s; }
+#imageGallery .col-md-4:nth-child(5) { animation-delay: 0.4s; }
+#imageGallery .col-md-4:nth-child(6) { animation-delay: 0.5s; }
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .image-card .card-img-container {
+        height: 150px;
+    }
+}
