@@ -1,0 +1,86 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  INFRA_REPO: https://github.com/OppongNicholas303/Week5LabS3ApplicationTemplater
+  INFRA_BRANCH: main
+  ECR_REPOSITORY: week5-lab-ecr-nicholas
+  ECS_CLUSTER: Week5-lab-cluster-nicholas
+  ECS_SERVICE: week5-lab-SService-nicholas
+  STACK_NAME_VPC: my-vpc-stack-nicholas
+  STACK_NAME_ECS: my-ecs-stack-nicholas
+  S3_BUCKET: week5-lab-bucket-nicholas
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout Application Code
+        uses: actions/checkout@v4
+
+      - name: Checkout Infrastructure Repository
+        run: |
+          git clone https://x-access-token:${{ secrets.INFRA_REPO_PAT }}@github.com/${{ env.INFRA_REPO }} infra
+          cd infra
+          git checkout $INFRA_BRANCH
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsRole  # ✅ Replace with your actual AWS IAM Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin 123456789012.dkr.ecr.$AWS_REGION.amazonaws.com
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=$(date +%Y%m%d%H%M%S)
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG 123456789012.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push 123456789012.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Deploy VPC with CloudFormation (if needed)
+        run: |
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_VPC \
+            --template-file infra/vpc.yaml \
+            --capabilities CAPABILITY_NAMED_IAM
+
+      - name: Deploy ECS Cluster & Service
+        run: |
+          VPC_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='VPCId'].OutputValue" --output text)
+          SUBNET1=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet1'].OutputValue" --output text)
+          SUBNET2=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet2'].OutputValue" --output text)
+
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_ECS \
+            --template-file infra/ecs.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              VPCId=$VPC_ID \
+              Subnet1=$SUBNET1 \
+              Subnet2=$SUBNET2 \
+              ECRRepositoryUri=123456789012.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG \
+              S3Bucket=$S3_BUCKET \
+              AWSRegion=$AWS_REGION
+
+      - name: Update ECS Service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment
