@@ -7,7 +7,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  INFRA_REPO: https://github.com/OppongNicholas303/Week5LabS3ApplicationTemplater
+  INFRA_REPO: OppongNicholas303/Week5LabS3ApplicationTemplater
   INFRA_BRANCH: main
   ECR_REPOSITORY: week5-lab-ecr-nicholas
   ECS_CLUSTER: Week5-lab-cluster-nicholas
@@ -30,27 +30,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout Infrastructure Repository
-        run: |
-          git clone https://x-access-token:${{ secrets.INFRA_REPO_PAT }}@github.com/${{ env.INFRA_REPO }} infra
-          cd infra
-          git checkout $INFRA_BRANCH
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          path: infra
+          ref: ${{ env.INFRA_BRANCH }}
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsRole  # ✅ Replace with your actual AWS IAM Role
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole  # ✅ Replace with your actual AWS IAM Role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         run: |
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin 123456789012.dkr.ecr.$AWS_REGION.amazonaws.com
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
 
       - name: Build and Push Docker Image
         run: |
           IMAGE_TAG=$(date +%Y%m%d%H%M%S)
           docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REPOSITORY:$IMAGE_TAG 123456789012.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push 123456789012.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
       - name: Deploy VPC with CloudFormation (if needed)
@@ -74,7 +75,7 @@ jobs:
               VPCId=$VPC_ID \
               Subnet1=$SUBNET1 \
               Subnet2=$SUBNET2 \
-              ECRRepositoryUri=123456789012.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG \
+              ECRRepositoryUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG \
               S3Bucket=$S3_BUCKET \
               AWSRegion=$AWS_REGION
 
