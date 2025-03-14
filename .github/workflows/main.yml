@@ -13,7 +13,9 @@ env:
   ECS_CLUSTER: Week5-lab-cluster-nicholas
   ECS_SERVICE: week5-lab-SService-nicholas
   STACK_NAME_VPC: my-vpc-stack-nicholas
-  STACK_NAME_ECS: my-ecs-stack-nicholas
+  STACK_NAME_BASE: ecs-base-stack-nicholas
+  STACK_NAME_LB: ecs-lb-stack-nicholas
+  STACK_NAME_SERVICE: ecs-service-stack-nicholas
   S3_BUCKET: week5-lab-bucket-nicholas
   CODEDEPLOY_APP: Week5LabECSApp
   CODEDEPLOY_DEPLOYMENT_GROUP: Week5LabDeploymentGroup
@@ -68,37 +70,13 @@ jobs:
           docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
 
-      - name: Check and delete VPC stack if in ROLLBACK_COMPLETE state
-        run: |
-          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "STACK_NOT_FOUND")
-          echo "VPC Stack status: $STACK_STATUS"
-          if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
-            echo "Stack is in ROLLBACK_COMPLETE state, deleting it..."
-            aws cloudformation delete-stack --stack-name $STACK_NAME_VPC
-            echo "Waiting for stack deletion to complete..."
-            aws cloudformation wait stack-delete-complete --stack-name $STACK_NAME_VPC
-          fi
-        continue-on-error: true
-
-      - name: Deploy VPC with CloudFormation
+      - name: Deploy VPC
         run: |
           aws cloudformation deploy \
             --stack-name $STACK_NAME_VPC \
             --template-file infra/vpc.yaml \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
-
-      - name: Check and delete ECS stack if in ROLLBACK_COMPLETE state
-        run: |
-          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_ECS --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "STACK_NOT_FOUND")
-          echo "ECS Stack status: $STACK_STATUS"
-          if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
-            echo "Stack is in ROLLBACK_COMPLETE state, deleting it..."
-            aws cloudformation delete-stack --stack-name $STACK_NAME_ECS
-            echo "Waiting for stack deletion to complete..."
-            aws cloudformation wait stack-delete-complete --stack-name $STACK_NAME_ECS
-          fi
-        continue-on-error: true
 
       - name: Get VPC Outputs
         run: |
@@ -110,20 +88,35 @@ jobs:
           echo "SUBNET1=$SUBNET1" >> $GITHUB_ENV
           echo "SUBNET2=$SUBNET2" >> $GITHUB_ENV
 
-      - name: Prepare ECS Template
-        run: |
-          # Copy the fixed ECS template to the infra directory if needed
-          # This step is optional if your ecs.yaml is already correct in the infra repo
-          # cp infra/ecs.yaml infra/ecs-deploy.yaml
-
-      - name: Deploy ECS Cluster & Service
+      - name: Deploy Base ECS Infrastructure
         run: |
           aws cloudformation deploy \
-            --stack-name $STACK_NAME_ECS \
-            --template-file infra/ecs.yaml \
+            --stack-name $STACK_NAME_BASE \
+            --template-file infra/ecs-base.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              S3Bucket=$S3_BUCKET \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy Load Balancer and Target Groups
+        run: |
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_LB \
+            --template-file infra/ecs-lb.yaml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
               VPCId=$VPC_ID \
+              Subnet1=$SUBNET1 \
+              Subnet2=$SUBNET2 \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy ECS Service and Deployment
+        run: |
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_SERVICE \
+            --template-file infra/ecs-service.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
               Subnet1=$SUBNET1 \
               Subnet2=$SUBNET2 \
               ECRRepositoryUri=$IMAGE_URI \
@@ -131,29 +124,18 @@ jobs:
               AWSRegion=$AWS_REGION \
             --no-fail-on-empty-changeset
 
-      - name: Prepare Task Definition
+      - name: Wait for ECS Service to be stable
         run: |
-          # Replace placeholders in the task definition template
-          sed -i "s|\${AWS_ACCOUNT_ID}|${{ secrets.AWS_ACCOUNT_ID }}|g" infra/task-def.json
-          sed -i "s|\${ECRRepositoryUri}|$IMAGE_URI|g" infra/task-def.json
-          sed -i "s|\${S3_BUCKET}|$S3_BUCKET|g" infra/task-def.json
-          sed -i "s|\${AWS_REGION}|$AWS_REGION|g" infra/task-def.json
-
-      - name: Register Task Definition
-        run: |
-          TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://infra/task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
-          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+          echo "Waiting for ECS service to be stable..."
+          aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
+        continue-on-error: true
 
       - name: Prepare AppSpec File
         run: |
-          # Replace the task definition ARN in the appspec.json file
-          sed -i "s|\${TASK_DEF_ARN}|$TASK_DEF_ARN|g" infra/appspec.json
-
-      - name: Wait for ECS Service to be stable
-        run: |
-          echo "Waiting for ECS service to be stable before deploying new version..."
-          aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
-        continue-on-error: true
+          # Prepare AppSpec file with necessary configurations
+          # This might involve replacing placeholders or updating task definition
+          echo "Preparing AppSpec file..."
+          # Add your specific AppSpec preparation steps here
 
       - name: Trigger Blue/Green Deployment
         run: |
@@ -164,3 +146,7 @@ jobs:
             --revision file://infra/appspec.json \
             --query 'deploymentId' --output text)
           echo "DEPLOYMENT_ID=$DEPLOYMENT_ID"
+
+      - name: Wait for Deployment
+        run: |
+          aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
