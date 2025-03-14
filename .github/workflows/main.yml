@@ -1,48 +1,43 @@
 name: Deploy to AWS ECS
-
 on:
   push:
     branches:
       - main
-
 env:
   AWS_REGION: us-east-1
   INFRA_REPO: OppongNicholas303/Week5LabS3ApplicationTemplater
   INFRA_BRANCH: main
   ECR_REPOSITORY: week5-lab-ecr-nicholas
   ECS_CLUSTER: Week5-lab-cluster-nicholas
-  ECS_SERVICE: week5-lab-SService-nicholas
+  ECS_SERVICE: my-ecs-stack-nicholas
   STACK_NAME_VPC: my-vpc-stack-nicholas
   STACK_NAME_ECS: my-ecs-stack-nicholas
   S3_BUCKET: week5-lab-bucket-nicholas
-
 jobs:
   deploy:
     name: Deploy Application
     runs-on: ubuntu-latest
-
     permissions:
       id-token: write
       contents: read
-
     steps:
       - name: Checkout Application Code
         uses: actions/checkout@v4
-
+      
       - name: Checkout Infrastructure Repository
         uses: actions/checkout@v4
         with:
           repository: ${{ env.INFRA_REPO }}
           path: infra
           ref: ${{ env.INFRA_BRANCH }}
-
+      
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
+      
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
@@ -59,35 +54,59 @@ jobs:
           docker tag $ECR_REPOSITORY:$IMAGE_TAG ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-
-      - name: Deploy VPC with CloudFormation (if needed)
+      
+      - name: Deploy VPC with CloudFormation
         run: |
           aws cloudformation deploy \
             --stack-name $STACK_NAME_VPC \
             --template-file infra/vpc.yaml \
-            --capabilities CAPABILITY_NAMED_IAM
-
-      - name: Deploy ECS Cluster & Service
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+      
+      - name: Get VPC Stack Outputs
         run: |
           VPC_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='VPCId'].OutputValue" --output text)
-          SUBNET1=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet1'].OutputValue" --output text)
-          SUBNET2=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet2'].OutputValue" --output text)
-
+          PUBLIC_SUBNET1=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet1'].OutputValue" --output text)
+          PUBLIC_SUBNET2=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet2'].OutputValue" --output text)
+          PRIVATE_SUBNET1=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PrivateSubnet1'].OutputValue" --output text)
+          PRIVATE_SUBNET2=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PrivateSubnet2'].OutputValue" --output text)
+          ALB_SG=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='ALBSecurityGroup'].OutputValue" --output text)
+          ECS_SG=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='ECSSecurityGroup'].OutputValue" --output text)
+          LISTENER_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='ListenerArn'].OutputValue" --output text)
+          
+          echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
+          echo "PUBLIC_SUBNET1=$PUBLIC_SUBNET1" >> $GITHUB_ENV
+          echo "PUBLIC_SUBNET2=$PUBLIC_SUBNET2" >> $GITHUB_ENV
+          echo "PRIVATE_SUBNET1=$PRIVATE_SUBNET1" >> $GITHUB_ENV
+          echo "PRIVATE_SUBNET2=$PRIVATE_SUBNET2" >> $GITHUB_ENV
+          echo "ALB_SG=$ALB_SG" >> $GITHUB_ENV
+          echo "ECS_SG=$ECS_SG" >> $GITHUB_ENV
+          echo "LISTENER_ARN=$LISTENER_ARN" >> $GITHUB_ENV
+      
+      - name: Deploy ECS Cluster & Service
+        run: |
           aws cloudformation deploy \
             --stack-name $STACK_NAME_ECS \
             --template-file infra/ecs.yaml \
             --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
             --parameter-overrides \
               VPCId=$VPC_ID \
-              Subnet1=$SUBNET1 \
-              Subnet2=$SUBNET2 \
+              PublicSubnet1=$PUBLIC_SUBNET1 \
+              PublicSubnet2=$PUBLIC_SUBNET2 \
+              PrivateSubnet1=$PRIVATE_SUBNET1 \
+              PrivateSubnet2=$PRIVATE_SUBNET2 \
+              ALBSecurityGroup=$ALB_SG \
+              ECSSecurityGroup=$ECS_SG \
+              ALBListenerArn=$LISTENER_ARN \
+              ECSClusterName=$ECS_CLUSTER \
               ECRRepositoryUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG \
-              S3Bucket=$S3_BUCKET \
+              S3BucketName=$S3_BUCKET \
               AWSRegion=$AWS_REGION
-
-      - name: Update ECS Service
+      
+      - name: Force New ECS Deployment
         run: |
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
-            --service $ECS_SERVICE \
+            --service $STACK_NAME_ECS \
             --force-new-deployment
