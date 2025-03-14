@@ -1,4 +1,4 @@
-name: Deploy to AWS ECS
+name: Deploy to AWS ECS with Blue/Green Deployment
 
 on:
   push:
@@ -15,10 +15,12 @@ env:
   STACK_NAME_VPC: my-vpc-stack-nicholas
   STACK_NAME_ECS: my-ecs-stack-nicholas
   S3_BUCKET: week5-lab-bucket-nicholas
+  CODEDEPLOY_APP: Week5LabECSApp
+  CODEDEPLOY_DEPLOYMENT_GROUP: Week5LabDeploymentGroup
 
 jobs:
   deploy:
-    name: Deploy Application
+    name: Build, Push Image & Deploy
     runs-on: ubuntu-latest
 
     permissions:
@@ -43,51 +45,98 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Create S3 Bucket if not exists
+        run: |
+          aws s3api head-bucket --bucket $S3_BUCKET 2>/dev/null || \
+          aws s3api create-bucket --bucket $S3_BUCKET --region $AWS_REGION
+
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
-      
-      - name: Create ECR Repository if it doesn't exist
+
+      - name: Create ECR Repository if not exists
         run: |
           aws ecr describe-repositories --repository-names $ECR_REPOSITORY || \
           aws ecr create-repository --repository-name $ECR_REPOSITORY
-          
+
       - name: Build and Push Docker Image
         run: |
           IMAGE_TAG=$(date +%Y%m%d%H%M%S)
-          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REPOSITORY:$IMAGE_TAG ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      - name: Deploy VPC with CloudFormation (if needed)
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+
+      - name: Deploy VPC with CloudFormation
         run: |
           aws cloudformation deploy \
             --stack-name $STACK_NAME_VPC \
             --template-file infra/vpc.yaml \
-            --capabilities CAPABILITY_NAMED_IAM
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
 
-      - name: Deploy ECS Cluster & Service
+      - name: Get VPC Outputs
         run: |
           VPC_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='VPCId'].OutputValue" --output text)
           SUBNET1=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet1'].OutputValue" --output text)
           SUBNET2=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet2'].OutputValue" --output text)
+          
+          echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
+          echo "SUBNET1=$SUBNET1" >> $GITHUB_ENV
+          echo "SUBNET2=$SUBNET2" >> $GITHUB_ENV
 
+      - name: Prepare ECS Template
+        run: |
+          # Copy the fixed ECS template to the infra directory
+          cp infra/ecs.yaml infra/ecs-deploy.yaml
+
+      - name: Deploy ECS Cluster & Service
+        run: |
           aws cloudformation deploy \
             --stack-name $STACK_NAME_ECS \
-            --template-file infra/ecs.yaml \
+            --template-file infra/ecs-deploy.yaml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
               VPCId=$VPC_ID \
               Subnet1=$SUBNET1 \
               Subnet2=$SUBNET2 \
-              ECRRepositoryUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG \
+              ECRRepositoryUri=$IMAGE_URI \
               S3Bucket=$S3_BUCKET \
-              AWSRegion=$AWS_REGION
+              AWSRegion=$AWS_REGION \
+            --no-fail-on-empty-changeset
 
-      - name: Update ECS Service
+      - name: Prepare Task Definition
         run: |
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service $ECS_SERVICE \
-            --force-new-deployment
+          # Replace placeholders in the task definition template
+          sed -i "s|\${AWS_ACCOUNT_ID}|${{ secrets.AWS_ACCOUNT_ID }}|g" infra/task-def.json
+          sed -i "s|\${ECRRepositoryUri}|$IMAGE_URI|g" infra/task-def.json
+          sed -i "s|\${S3_BUCKET}|$S3_BUCKET|g" infra/task-def.json
+          sed -i "s|\${AWS_REGION}|$AWS_REGION|g" infra/task-def.json
+
+      - name: Register Task Definition
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://infra/task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+
+      - name: Prepare AppSpec File
+        run: |
+          # Replace the task definition ARN in the appspec.json file
+          sed -i "s|\${TASK_DEF_ARN}|$TASK_DEF_ARN|g" infra/appspec.json
+
+      - name: Trigger Blue/Green Deployment
+        run: |
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name $CODEDEPLOY_APP \
+            --deployment-group-name $CODEDEPLOY_DEPLOYMENT_GROUP \
+            --revision file://infra/appspec.json \
+            --query 'deploymentId' --output text)
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID"
+          
+          # Wait for deployment to complete
+          aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
+
+      - name: Output Service URL
+        run: |
+          SERVICE_URL=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_ECS --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text)
+          echo "##[notice] Your application is deployed at: $SERVICE_URL"
