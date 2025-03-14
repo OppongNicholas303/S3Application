@@ -1,155 +1,93 @@
-name: ECS Blue/Green Deployment
+name: Deploy to AWS ECS
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches:
+      - main
 
 env:
   AWS_REGION: us-east-1
+  INFRA_REPO: OppongNicholas303/Week5LabS3ApplicationTemplater
+  INFRA_BRANCH: main
   ECR_REPOSITORY: week5-lab-ecr-nicholas
-  ECS_CLUSTER: MyECSCluster
-  ECS_SERVICE: ${AWS::StackName}-service
-  ECS_TASK_DEFINITION: task-definition.json
-  CONTAINER_NAME: my-container
-  S3_BUCKET: ${S3BucketName}
+  ECS_CLUSTER: Week5-lab-cluster-nicholas
+  ECS_SERVICE: week5-lab-SService-nicholas
+  STACK_NAME_VPC: my-vpc-stack-nicholas
+  STACK_NAME_ECS: my-ecs-stack-nicholas
+  S3_BUCKET: week5-lab-bucket-nicholas
 
 jobs:
   deploy:
-    name: Deploy
+    name: Deploy Application
     runs-on: ubuntu-latest
-    environment: production
+
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout Application Code
+        uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - name: Checkout Infrastructure Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          path: infra
+          ref: ${{ env.INFRA_BRANCH }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Build, tag, and push image to Amazon ECR
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Build a docker container and push it to ECR
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-      - name: Fill in the new image ID in the Amazon ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: ${{ env.ECS_TASK_DEFINITION }}
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.build-image.outputs.image }}
-
-      - name: Register new Amazon ECS task definition
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
+      
+      - name: Create ECR Repository if it doesn't exist
         run: |
-          aws ecs register-task-definition \
-            --cli-input-json file://${{ steps.task-def.outputs.task-definition }}
-
-      - name: Get current task definition ARN
-        id: current-taskdef
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY || \
+          aws ecr create-repository --repository-name $ECR_REPOSITORY
+          
+      - name: Build and Push Docker Image
         run: |
-          TASK_DEF_ARN=$(aws ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --query 'services[0].taskDefinition' --output text)
-          echo "::set-output name=task-definition-arn::$TASK_DEF_ARN"
-          echo "Current task definition ARN: $TASK_DEF_ARN"
+          IMAGE_TAG=$(date +%Y%m%d%H%M%S)
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-      - name: Get CodeDeploy app and deployment group
-        id: codedeploy-info
+      - name: Deploy VPC with CloudFormation (if needed)
         run: |
-          # Export stack name from the task definition ARN
-          STACK_NAME=$(echo ${{ steps.current-taskdef.outputs.task-definition-arn }} | sed -n 's/.*\:\([^:]*\)-task.*/\1/p')
-          echo "Stack name: $STACK_NAME"
-          
-          APP_NAME="${STACK_NAME}-deploy-app"
-          DEPLOYMENT_GROUP="${STACK_NAME}-deploy-group"
-          
-          echo "::set-output name=app-name::$APP_NAME"
-          echo "::set-output name=deployment-group::$DEPLOYMENT_GROUP"
-          echo "CodeDeploy App: $APP_NAME"
-          echo "CodeDeploy Deployment Group: $DEPLOYMENT_GROUP"
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_VPC \
+            --template-file infra/vpc.yaml \
+            --capabilities CAPABILITY_NAMED_IAM
 
-      - name: Create CodeDeploy Deployment
-        id: deploy
+      - name: Deploy ECS Cluster & Service
         run: |
-          # Get the active target group ARN
-          ACTIVE_TARGET_GROUP=$(aws elbv2 describe-target-groups \
-            --target-group-arns $(aws elbv2 describe-listeners \
-              --listener-arns $(aws elbv2 describe-load-balancers \
-                --load-balancer-arns $(aws ecs describe-services \
-                  --cluster ${{ env.ECS_CLUSTER }} \
-                  --services ${{ env.ECS_SERVICE }} \
-                  --query 'services[0].loadBalancers[0].loadBalancerName' \
-                  --output text) \
-                --query 'LoadBalancers[0].LoadBalancerArn' \
-                --output text) \
-              --query 'Listeners[0].ListenerArn' \
-              --output text) \
-            --query 'TargetGroups[?Port==`80`].TargetGroupArn' \
-            --output text)
-          
-          # Get the green target group - should be the one not currently active
-          GREEN_TARGET_GROUP=$(aws elbv2 describe-target-groups \
-            --names ${STACK_NAME}-green-tg ${STACK_NAME}-blue-tg \
-            --query 'TargetGroups[?TargetGroupArn!=`'$ACTIVE_TARGET_GROUP'`].TargetGroupArn' \
-            --output text)
-          
-          echo "Active target group: $ACTIVE_TARGET_GROUP"
-          echo "Green target group: $GREEN_TARGET_GROUP"
-          
-          # Create the deployment
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition ${{ steps.task-def.outputs.task-definition }} \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-          
-          # Create AppSpec file for CodeDeploy
-          cat > appspec.yaml <<EOF
-          version: 0.0
-          Resources:
-            - TargetService:
-                Type: AWS::ECS::Service
-                Properties:
-                  TaskDefinition: ${TASK_DEF}
-                  LoadBalancerInfo:
-                    ContainerName: "${{ env.CONTAINER_NAME }}"
-                    ContainerPort: 80
-          EOF
-          
-          # Create deployment
-          DEPLOYMENT_ID=$(aws deploy create-deployment \
-            --application-name ${{ steps.codedeploy-info.outputs.app-name }} \
-            --deployment-group-name ${{ steps.codedeploy-info.outputs.deployment-group }} \
-            --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml | base64)'}" \
-            --description "Deployment from GitHub Actions" \
-            --query 'deploymentId' \
-            --output text)
-          
-          echo "::set-output name=deployment-id::$DEPLOYMENT_ID"
-          echo "Deployment ID: $DEPLOYMENT_ID"
-          
-          # Wait for deployment to complete
-          aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
-          
-          echo "Deployment completed successfully!"
+          VPC_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='VPCId'].OutputValue" --output text)
+          SUBNET1=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet1'].OutputValue" --output text)
+          SUBNET2=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_VPC --query "Stacks[0].Outputs[?OutputKey=='PublicSubnet2'].OutputValue" --output text)
 
-      - name: Upload S3 assets (if any)
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_ECS \
+            --template-file infra/ecs.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              VPCId=$VPC_ID \
+              Subnet1=$SUBNET1 \
+              Subnet2=$SUBNET2 \
+              ECRRepositoryUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG \
+              S3Bucket=$S3_BUCKET \
+              AWSRegion=$AWS_REGION
+
+      - name: Update ECS Service
         run: |
-          if [ -d "assets" ]; then
-            aws s3 sync assets s3://${{ env.S3_BUCKET }}/assets --delete
-            echo "Assets uploaded to S3"
-          else
-            echo "No assets directory found, skipping S3 upload"
-          fi
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment
