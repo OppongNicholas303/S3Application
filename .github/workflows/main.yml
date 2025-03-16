@@ -7,7 +7,7 @@ on:
 
 env:
   AWS_REGION: us-east-1  # Change to your region
-  ECR_REPOSITORY: week5-lab-ecr-nicholas  # Change to your ECR repo name
+  ECR_REPOSITORY: week5-lab-ecr-nicholas  # Change to your ECR repo name 
   INFRASTRUCTURE_REPO: OppongNicholas303/S3-Image-Application-Infrastructure
   STACK_NAME: S3AppStack
   ECS_CLUSTER: S3AppCluster
