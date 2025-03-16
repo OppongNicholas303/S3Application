@@ -15,7 +15,9 @@ env:
   STACK_NAME_VPC: my-vpc-stack-nicholas
   STACK_NAME_BASE: ecs-base-stack-nicholas
   STACK_NAME_LB: ecs-lb-stack-nicholas
+  STACK_NAME_TASK_DEF: ecs-task-definition-stack-nicholas
   STACK_NAME_SERVICE: ecs-service-stack-nicholas
+  STACK_NAME_DEPLOYMENT: ecs-deployment-group-stack-nicholas
   S3_BUCKET: week5-lab-bucket-nicholas
   CODEDEPLOY_APP: Week5LabECSApp
   CODEDEPLOY_DEPLOYMENT_GROUP: Week5LabDeploymentGroup
@@ -110,7 +112,19 @@ jobs:
               Subnet2=$SUBNET2 \
             --no-fail-on-empty-changeset
 
-      - name: Deploy ECS Service and Deployment
+      - name: Deploy Task Definition & CodeDeploy Application
+        run: |
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_TASK_DEF \
+            --template-file infra/task-definition.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ECRRepositoryUri=$IMAGE_URI \
+              S3Bucket=$S3_BUCKET \
+              AWSRegion=$AWS_REGION \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy ECS Service 
         run: |
           aws cloudformation deploy \
             --stack-name $STACK_NAME_SERVICE \
@@ -119,9 +133,14 @@ jobs:
             --parameter-overrides \
               Subnet1=$SUBNET1 \
               Subnet2=$SUBNET2 \
-              ECRRepositoryUri=$IMAGE_URI \
-              S3Bucket=$S3_BUCKET \
-              AWSRegion=$AWS_REGION \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy CodeDeploy Deployment Group
+        run: |
+          aws cloudformation deploy \
+            --stack-name $STACK_NAME_DEPLOYMENT \
+            --template-file infra/deployment-group.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
       - name: Wait for ECS Service to be stable
@@ -132,10 +151,10 @@ jobs:
 
       - name: Prepare AppSpec File
         run: |
-          # Prepare AppSpec file with necessary configurations
-          # This might involve replacing placeholders or updating task definition
-          echo "Preparing AppSpec file..."
-          # Add your specific AppSpec preparation steps here
+          TASK_DEF_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME_TASK_DEF --query "Stacks[0].Outputs[?OutputKey=='TaskDefinitionArn'].OutputValue" --output text)
+          # Create a temporary appspec file with the correct task definition ARN
+          sed "s|\${TASK_DEF_ARN}|$TASK_DEF_ARN|g" infra/appspec.json > /tmp/appspec.json
+          cp /tmp/appspec.json infra/appspec.json
 
       - name: Trigger Blue/Green Deployment
         run: |
