@@ -11,8 +11,8 @@ import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 @Configuration
 public class S3Config {
 
-    @Value("${aws.region}")
-    private String awsRegion;
+   // @Value("${aws.region}")
+    private String awsRegion = "us-east-1";
 
     @Bean
     public S3Client s3Client() {
