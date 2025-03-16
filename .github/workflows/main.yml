@@ -3,7 +3,7 @@ name: CI/CD Pipeline
 on:
   push:
     branches:
-      - main  # Change this if needed
+      - main  # Change this if needed 
 
 env:
   AWS_REGION: us-east-1  # Change to your region
