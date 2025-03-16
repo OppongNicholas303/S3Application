@@ -62,7 +62,7 @@ jobs:
             --template-file infrastructure/infastructure2.yaml \
             --stack-name $STACK_NAME \
             --parameter-overrides ImageUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest \
-            --capabilities CAPABILITY_IAM
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
 
       - name: Trigger Blue/Green Deployment in ECS
         run: |
