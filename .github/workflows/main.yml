@@ -87,7 +87,8 @@ jobs:
           aws ecs describe-task-definition --task-definition s3-app-task --query taskDefinition > task-definition.json
 
           # Update image in task definition
-          jq '.containerDefinitions[0].image = "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"' task-definition.json > new-task-def.json
+          jq --arg IMAGE "677276083056.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG" \'.containerDefinitions[0].image = $IMAGE' task-definition.json > new-task-def.json
+
 
           # Register new task definition version
           NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
@@ -114,7 +115,7 @@ jobs:
                   TaskDefinition: "${TASK_DEF_ARN}"
                   LoadBalancerInfo:
                     ContainerName: "S3AppContainer"
-                    ContainerPort: 8080
+                    ContainerPort: 3000
                   PlatformVersion: "LATEST"
           EOF
           
