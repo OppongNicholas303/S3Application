@@ -6,7 +6,7 @@ on:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: week5-lab-ecr-nicholas
-  INFRASTRUCTURE_REPO: OppongNicholas303/S3-Image-Application-Infrastructure   
+  INFRASTRUCTURE_REPO: OppongNicholas303/S3-Image-Application-Infrastructure    
   STACK_NAME: S3AppStack 
 
 jobs:
