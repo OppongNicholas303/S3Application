@@ -84,14 +84,14 @@ jobs:
         id: register-task-def
         run: |
           # Fetch existing task definition
-          aws ecs describe-task-definition --task-definition $SERVICE_NAME --query taskDefinition > task-definition.json
+          aws ecs describe-task-definition --task-definition s3-app-task --query taskDefinition > task-definition.json
 
           # Update image in task definition
           jq '.containerDefinitions[0].image = "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"' task-definition.json > new-task-def.json
 
           # Register new task definition version
           NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --family $SERVICE_NAME \
+            --family s3-app-task \
             --requires-compatibilities FARGATE \
             --network-mode awsvpc \
             --cpu 2048 \
