@@ -27,8 +27,8 @@ public class ImageService {
 
     private final S3Client s3Client;
 
-    //@Value("${aws.s3.bucket-name}")
-    private String bucketName = "week5-lab-bucket-nicholas";
+    @Value("${aws.s3.bucket-name}")
+    private String bucketName;
 
     public ImageService(S3Client s3Client) {
         this.s3Client = s3Client;
