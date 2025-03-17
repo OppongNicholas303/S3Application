@@ -1,163 +1,61 @@
-name: CI/CD Pipeline for S3 Image Application
+name: CI/CD Pipeline
 on:
   push: 
     branches:  
       - main
-
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: week5-lab-ecr-nicholas
-  ECS_CLUSTER: S3AppCluster
-  ECS_SERVICE: S3AppService
-  TASK_DEFINITION_FAMILY: s3-app-task
-  CONTAINER_NAME: s3-app-container
-
-permissions:
-  id-token: write
-  contents: read
+  INFRASTRUCTURE_REPO: OppongNicholas303/S3-Image-Application-Infrastructure    
+  STACK_NAME: S3AppStack 
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout application code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v2
         
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4 
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: us-east-1
           
       - name: Log in to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
         
       - name: Build and tag Docker image
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker build -t $ECR_REPOSITORY .
+          docker tag $ECR_REPOSITORY:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest
           
       - name: Push Docker image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
-      - name: Prepare ECS Task Definition
-        id: prepare-task-def
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest
+          
+      - name: Check if CloudFormation stack exists
+        id: check-stack
         run: |
-          # Generate task definition
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.TASK_DEFINITION_FAMILY }} \
-            --query taskDefinition \
-            | jq 'del(
-              .taskDefinitionArn,
-              .revision,
-              .status,
-              .requiresAttributes,
-              .compatibilities,
-              .registeredAt,
-              .registeredBy
-            )' > task-definition.json
-
-          # Update image in task definition
-          sed -i 's|"image": "[^"]*"|"image": "'"$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"'"|g' task-definition.json
-
-      - name: Deploy to ECS with Blue-Green Strategy
-        id: deploy-ecs
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          # Register new task definition
-          NEW_TASK_DEF=$(aws ecs register-task-definition \
-            --cli-input-json file://task-definition.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          # Update service with new task definition
-          aws ecs update-service \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --service ${{ env.ECS_SERVICE }} \
-            --task-definition $NEW_TASK_DEF \
-            --force-new-deployment \
-            --deployment-configuration maximumPercent=200,minimumHealthyPercent=50
-
-      - name: Verify Deployment
-        id: verify-deployment
-        run: |
-          # Wait for deployment to stabilize
-          aws ecs wait services-stable \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }}
-
-          # Get service description to check deployment status
-          SERVICE_DESCRIPTION=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }})
-
-          # Check deployment status
-          RUNNING_COUNT=$(echo $SERVICE_DESCRIPTION | jq '.services[0].runningCount')
-          DESIRED_COUNT=$(echo $SERVICE_DESCRIPTION | jq '.services[0].desiredCount')
-
-          if [ "$RUNNING_COUNT" -ne "$DESIRED_COUNT" ]; then
-            echo "Deployment failed: Running count does not match desired count"
-            exit 1
+          if aws cloudformation describe-stacks --stack-name $STACK_NAME 2>&1 | grep -q "Stack with id $STACK_NAME does not exist"; then
+            echo "STACK_EXISTS=false" >> $GITHUB_ENV
+          else
+            echo "STACK_EXISTS=true" >> $GITHUB_ENV
           fi
-
-      - name: Rollback on Failure
-        if: failure()
+          
+      - name: Checkout Infrastructure Repository
+        if: env.STACK_EXISTS == 'false'
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ env.INFRASTRUCTURE_REPO }}
+          path: infrastructure
+          
+      - name: Deploy CloudFormation Stack
+        if: env.STACK_EXISTS == 'false'
         run: |
-          # Rollback to previous stable task definition
-          PREVIOUS_TASK_DEF=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
-            --output text)
-
-          aws ecs update-service \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --service ${{ env.ECS_SERVICE }} \
-            --task-definition $PREVIOUS_TASK_DEF \
-            --force-new-deployment
-
-      - name: Slack Notification
-        if: always()
-        uses: 8398a7/action-slack@v3
-        with:
-          status: ${{ job.status }}
-          text: Deployment ${{ job.status == 'success' && 'succeeded' || 'failed' }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
-
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: build-and-deploy
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          ignore-unfixed: true
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: 'trivy-results.sarif'
+          aws cloudformation deploy \
+            --template-file infrastructure/infastructure2.yaml \
+            --stack-name $STACK_NAME \
+            --parameter-overrides ImageUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
