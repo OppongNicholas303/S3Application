@@ -18,9 +18,16 @@ public class S3Config {
     public S3Client s3Client() {
         return S3Client.builder()
                 .region(Region.of(awsRegion))
-                .credentialsProvider(InstanceProfileCredentialsProvider.create())
-                .build();
+                .build();  // Use the default credentials provider chain
     }
+
+//    @Bean
+//    public S3Client s3Client() {
+//        return S3Client.builder()
+//                .region(Region.of(awsRegion))
+//                .credentialsProvider(InstanceProfileCredentialsProvider.create())
+//                .build();
+//    }
 
 //    @Bean
 //    public S3Client s3Client() {
