@@ -1,6 +1,6 @@
 name: CI/CD Pipeline
 on:
-  push:
+  push: 
     branches:  
       - main
 env:
