@@ -3,11 +3,16 @@ on:
   push: 
     branches:  
       - main
+
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: week5-lab-ecr-nicholas
   INFRASTRUCTURE_REPO: OppongNicholas303/S3-Image-Application-Infrastructure    
   STACK_NAME: S3AppStack 
+  SERVICE_NAME: S3AppService
+  CLUSTER_NAME: S3AppCluster
+  DEPLOYMENT_GROUP: S3AppDeploymentGroup
+  APPLICATION_NAME: S3AppCodeDeployApp
 
 jobs:
   build-and-deploy:
@@ -21,18 +26,22 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
           
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         
       - name: Build and tag Docker image
         run: |
-          docker build -t $ECR_REPOSITORY .
-          docker tag $ECR_REPOSITORY:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest
+          IMAGE_TAG=$(date +%s)
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest
           
       - name: Push Docker image to ECR
         run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest
           
       - name: Check if CloudFormation stack exists
@@ -59,3 +68,68 @@ jobs:
             --stack-name $STACK_NAME \
             --parameter-overrides ImageUri=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:latest \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+
+  blue-green-deployment:
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4 
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Register new ECS task definition
+        id: register-task-def
+        run: |
+          # Fetch existing task definition
+          aws ecs describe-task-definition --task-definition $SERVICE_NAME --query taskDefinition > task-definition.json
+
+          # Update image in task definition
+          jq '.containerDefinitions[0].image = "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"' task-definition.json > new-task-def.json
+
+          # Register new task definition version
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family $SERVICE_NAME \
+            --requires-compatibilities FARGATE \
+            --network-mode awsvpc \
+            --cpu 2048 \
+            --memory 4096 \
+            --execution-role-arn $(jq -r '.executionRoleArn' task-definition.json) \
+            --task-role-arn $(jq -r '.taskRoleArn' task-definition.json) \
+            --container-definitions "$(jq '.containerDefinitions' new-task-def.json)" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
+
+      - name: Generate AppSpec file
+        run: |
+          cat > appspec.yaml <<EOF
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: "${TASK_DEF_ARN}"
+                  LoadBalancerInfo:
+                    ContainerName: "S3AppContainer"
+                    ContainerPort: 8080
+                  PlatformVersion: "LATEST"
+          EOF
+          
+          sed -i "s|\${TASK_DEF_ARN}|${{ env.TASK_DEF_ARN }}|g" appspec.yaml
+          cat appspec.yaml
+
+      - name: Deploy to ECS using AWS CodeDeploy
+        run: |
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name $APPLICATION_NAME \
+            --deployment-group-name $DEPLOYMENT_GROUP \
+            --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
+            --description "Automated deployment via GitHub Actions" \
+            --query 'deploymentId' --output text)
+
+          echo "Started deployment: $DEPLOYMENT_ID"
+          aws deploy get-deployment --deployment-id $DEPLOYMENT_ID
+          echo "Monitor the deployment progress in AWS CodeDeploy console"
