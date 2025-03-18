@@ -1,184 +1,110 @@
-name: Blue/Green ECS Deployment
-on:
-  push:
-    branches: 
-      - main
-
-env:
-  AWS_REGION: us-east-1
-  ECR_REGISTRY: 677276083056.dkr.ecr.us-east-1.amazonaws.com
-  ECR_REPOSITORY: week5-lab-ecr-nicholas
-  ECS_CLUSTER: s3AppCluster
-  ECS_SERVICE: s3App-service
-  TASK_FAMILY: s3App-task
-  CODEDEPLOY_APP: s3App-application
-  CODEDEPLOY_GROUP: s3App-deployment-group
-
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.build-image.outputs.image_tag }}
+- name: Manage Existing Deployments
+  run: |
+    # Define an array of valid statuses
+    STATUSES=("CREATED" "SUCCEEDED" "STOPPED" "FAILED")
     
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build, tag, and push image
-        id: build-image
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Prepare Task Definition
-        run: |
-          # Retrieve current task definition
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.TASK_FAMILY }} \
-            --query 'taskDefinition' > current-task-def.json
-
-          # Create new task definition with updated image
-          NEW_TASK_DEF=$(aws ecs register-task-definition \
-            --family ${{ env.TASK_FAMILY }} \
-            --network-mode awsvpc \
-            --requires-compatibilities FARGATE \
-            --cpu 2048 \
-            --memory 4096 \
-            --execution-role-arn $(jq -r '.executionRoleArn' current-task-def.json) \
-            --task-role-arn $(jq -r '.taskRoleArn' current-task-def.json) \
-            --container-definitions "[{
-              \"name\": \"s3App-container\",
-              \"image\": \"${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}\",
-              \"essential\": true,
-              \"portMappings\": [{
-                \"containerPort\": 3000,
-                \"hostPort\": 3000,
-                \"protocol\": \"tcp\"
-              }],
-              \"logConfiguration\": {
-                \"logDriver\": \"awslogs\",
-                \"options\": {
-                  \"awslogs-group\": \"/ecs/${{ env.TASK_FAMILY }}\",
-                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
-                  \"awslogs-stream-prefix\": \"ecs\"
-                }
-              }
-            }]" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          echo "NEW_TASK_DEF=$NEW_TASK_DEF" >> $GITHUB_ENV
-
-      - name: Create AppSpec File
-        run: |
-          cat > appspec.yaml << EOF
-          version: 0.0
-          Resources:
-            - TargetService:
-                Type: AWS::ECS::Service
-                Properties:
-                  TaskDefinition: "${{ env.NEW_TASK_DEF }}"
-                  LoadBalancerInfo:
-                    ContainerName: "s3App-container"
-                    ContainerPort: 3000
-                  PlatformVersion: "LATEST"
-          EOF
-
-          cat appspec.yaml
-
-      - name: Manage Existing Deployments
-        run: |
-          # List valid deployment statuses
-          VALID_STATUSES=("CREATED" "SUCCEEDED" "STOPPED" "FAILED")
-          STATUS_FILTER=$(printf ",%s" "${VALID_STATUSES[@]}")
-          STATUS_FILTER=${STATUS_FILTER:1}
-
-          # Retrieve deployments with specific statuses
-          ACTIVE_DEPLOYMENTS=$(aws deploy list-deployments \
-            --application-name ${{ env.CODEDEPLOY_APP }} \
-            --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
-            --include-only-statuses $STATUS_FILTER \
-            --query 'deployments' \
-            --output text)
-
-          # Stop or clean up existing deployments if any
-          if [ -n "$ACTIVE_DEPLOYMENTS" ]; then
-            for DEPLOYMENT_ID in $ACTIVE_DEPLOYMENTS; do
-              echo "Processing deployment: $DEPLOYMENT_ID"
-              
-              # Get current deployment status
-              CURRENT_STATUS=$(aws deploy get-deployment \
-                --deployment-id $DEPLOYMENT_ID \
-                --query 'deploymentInfo.status' \
-                --output text)
-
-              echo "Current status of $DEPLOYMENT_ID: $CURRENT_STATUS"
-
-              # Stop or handle deployments based on status
-              case "$CURRENT_STATUS" in
-                "Created"|"InProgress")
-                  echo "Stopping deployment: $DEPLOYMENT_ID"
-                  aws deploy stop-deployment --deployment-id $DEPLOYMENT_ID
-                  ;;
-                "Succeeded"|"Stopped"|"Failed")
-                  echo "Deployment $DEPLOYMENT_ID already completed or failed"
-                  ;;
-                *)
-                  echo "Unexpected status for deployment $DEPLOYMENT_ID: $CURRENT_STATUS"
-                  ;;
-              esac
-            done
-          else
-            echo "No active deployments found"
-          fi
-
-      - name: Trigger CodeDeploy Deployment
-        run: |
-          # Create new deployment
-          DEPLOYMENT_ID=$(aws deploy create-deployment \
-            --application-name ${{ env.CODEDEPLOY_APP }} \
-            --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
-            --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
-            --description "Automated Blue/Green Deployment" \
-            --query 'deploymentId' \
-            --output text)
-
-          echo "Started deployment: $DEPLOYMENT_ID"
+    # Function to process deployments
+    process_deployments() {
+      local status=$1
+      echo "Checking deployments with status: $status"
+      
+      # List deployments with the specific status
+      DEPLOYMENTS=$(aws deploy list-deployments \
+        --application-name ${{ env.CODEDEPLOY_APP }} \
+        --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
+        --include-only-statuses "$status" \
+        --query 'deployments' \
+        --output text)
+      
+      # Process each deployment
+      if [ -n "$DEPLOYMENTS" ]; then
+        for DEPLOYMENT_ID in $DEPLOYMENTS; do
+          echo "Processing deployment: $DEPLOYMENT_ID with status: $status"
           
-          # Wait for deployment to complete or timeout
-          DEPLOYMENT_STATUS=$(aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID || echo "FAILED")
+          # Get detailed deployment information
+          DEPLOYMENT_INFO=$(aws deploy get-deployment \
+            --deployment-id "$DEPLOYMENT_ID" \
+            --query 'deploymentInfo' \
+            --output json)
           
-          if [ "$DEPLOYMENT_STATUS" == "FAILED" ]; then
-            echo "Deployment failed"
-            exit 1
-          fi
+          # Handle different statuses
+          case "$status" in
+            "CREATED"|"IN_PROGRESS")
+              echo "Stopping deployment: $DEPLOYMENT_ID"
+              aws deploy stop-deployment \
+                --deployment-id "$DEPLOYMENT_ID" \
+                --auto-rollback-enabled
+              ;;
+            "SUCCEEDED")
+              echo "Deployment $DEPLOYMENT_ID already completed successfully"
+              ;;
+            "STOPPED"|"FAILED")
+              echo "Deployment $DEPLOYMENT_ID is in terminal state: $status"
+              ;;
+          esac
+        done
+      else
+        echo "No deployments found with status: $status"
+      fi
+    }
+    
+    # Process deployments for each status
+    for STATUS in "${STATUSES[@]}"; do
+      process_deployments "$STATUS"
+    done
 
-      - name: Verify Deployment
-        run: |
-          # Additional verification steps
-          aws deploy get-deployment --deployment-id $DEPLOYMENT_ID
-          echo "Deployment completed successfully!"
+- name: Trigger CodeDeploy Deployment
+  run: |
+    # Add a small delay to ensure previous deployments are processed
+    sleep 10
+
+    # Create new deployment
+    DEPLOYMENT_ID=$(aws deploy create-deployment \
+      --application-name ${{ env.CODEDEPLOY_APP }} \
+      --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
+      --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
+      --description "Automated Blue/Green Deployment - $(date '+%Y-%m-%d %H:%M:%S')" \
+      --query 'deploymentId' \
+      --output text)
+
+    echo "Started new deployment: $DEPLOYMENT_ID"
+
+    # Monitor deployment
+    DEPLOYMENT_STATUS=""
+    MAX_ATTEMPTS=30
+    ATTEMPT=0
+
+    while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+      DEPLOYMENT_STATUS=$(aws deploy get-deployment \
+        --deployment-id "$DEPLOYMENT_ID" \
+        --query 'deploymentInfo.status' \
+        --output text)
+
+      echo "Deployment status (Attempt $((ATTEMPT+1))): $DEPLOYMENT_STATUS"
+
+      # Check for terminal states
+      case "$DEPLOYMENT_STATUS" in
+        "SUCCEEDED")
+          echo "Deployment completed successfully"
+          break
+          ;;
+        "FAILED"|"STOPPED")
+          echo "Deployment failed or stopped"
+          exit 1
+          ;;
+        "IN_PROGRESS")
+          sleep 30
+          ;;
+        *)
+          echo "Unexpected deployment status: $DEPLOYMENT_STATUS"
+          exit 1
+          ;;
+      esac
+
+      ATTEMPT=$((ATTEMPT+1))
+    done
+
+    if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+      echo "Deployment monitoring timed out"
+      exit 1
+    fi
