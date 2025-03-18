@@ -110,21 +110,54 @@ jobs:
 
           cat appspec.yaml
 
-      - name: Trigger CodeDeploy Deployment
+      - name: Manage Existing Deployments
         run: |
-          # Stop any existing deployments
+          # List valid deployment statuses
+          VALID_STATUSES=("CREATED" "SUCCEEDED" "STOPPED" "FAILED")
+          STATUS_FILTER=$(printf ",%s" "${VALID_STATUSES[@]}")
+          STATUS_FILTER=${STATUS_FILTER:1}
+
+          # Retrieve deployments with specific statuses
           ACTIVE_DEPLOYMENTS=$(aws deploy list-deployments \
             --application-name ${{ env.CODEDEPLOY_APP }} \
             --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
-            --include-only-statuses CREATED IN_PROGRESS \
+            --include-only-statuses $STATUS_FILTER \
             --query 'deployments' \
             --output text)
 
-          for DEPLOYMENT_ID in $ACTIVE_DEPLOYMENTS; do
-            echo "Stopping deployment: $DEPLOYMENT_ID"
-            aws deploy stop-deployment --deployment-id $DEPLOYMENT_ID
-          done
+          # Stop or clean up existing deployments if any
+          if [ -n "$ACTIVE_DEPLOYMENTS" ]; then
+            for DEPLOYMENT_ID in $ACTIVE_DEPLOYMENTS; do
+              echo "Processing deployment: $DEPLOYMENT_ID"
+              
+              # Get current deployment status
+              CURRENT_STATUS=$(aws deploy get-deployment \
+                --deployment-id $DEPLOYMENT_ID \
+                --query 'deploymentInfo.status' \
+                --output text)
 
+              echo "Current status of $DEPLOYMENT_ID: $CURRENT_STATUS"
+
+              # Stop or handle deployments based on status
+              case "$CURRENT_STATUS" in
+                "Created"|"InProgress")
+                  echo "Stopping deployment: $DEPLOYMENT_ID"
+                  aws deploy stop-deployment --deployment-id $DEPLOYMENT_ID
+                  ;;
+                "Succeeded"|"Stopped"|"Failed")
+                  echo "Deployment $DEPLOYMENT_ID already completed or failed"
+                  ;;
+                *)
+                  echo "Unexpected status for deployment $DEPLOYMENT_ID: $CURRENT_STATUS"
+                  ;;
+              esac
+            done
+          else
+            echo "No active deployments found"
+          fi
+
+      - name: Trigger CodeDeploy Deployment
+        run: |
           # Create new deployment
           DEPLOYMENT_ID=$(aws deploy create-deployment \
             --application-name ${{ env.CODEDEPLOY_APP }} \
