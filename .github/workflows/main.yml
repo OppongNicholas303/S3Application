@@ -1,110 +1,127 @@
-- name: Manage Existing Deployments
-  run: |
-    # Define an array of valid statuses
-    STATUSES=("CREATED" "SUCCEEDED" "STOPPED" "FAILED")
-    
-    # Function to process deployments
-    process_deployments() {
-      local status=$1
-      echo "Checking deployments with status: $status"
-      
-      # List deployments with the specific status
-      DEPLOYMENTS=$(aws deploy list-deployments \
-        --application-name ${{ env.CODEDEPLOY_APP }} \
-        --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
-        --include-only-statuses "$status" \
-        --query 'deployments' \
-        --output text)
-      
-      # Process each deployment
-      if [ -n "$DEPLOYMENTS" ]; then
-        for DEPLOYMENT_ID in $DEPLOYMENTS; do
-          echo "Processing deployment: $DEPLOYMENT_ID with status: $status"
+name: CI/CD Pipeline
+on:
+  push:
+    branches: main
+  pull_request:
+    branches: main
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn -B package --file pom.xml
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: private
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: 677276083056.dkr.ecr.us-east-1.amazonaws.com
+          ECR_REPOSITORY: week5-lab-ecr-nicholas
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy with Blue-Green strategy
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Register new task definition
+        id: task-def
+        run: |
+          # Get current task definition
+          aws ecs describe-task-definition --task-definition s3App-task --query taskDefinition > task-definition.json
           
-          # Get detailed deployment information
-          DEPLOYMENT_INFO=$(aws deploy get-deployment \
-            --deployment-id "$DEPLOYMENT_ID" \
-            --query 'deploymentInfo' \
-            --output json)
+          # Update container image in task definition to use latest tag
+          jq '.containerDefinitions[0].image = "677276083056.dkr.ecr.us-east-1.amazonaws.com/week5-lab-ecr-nicholas:latest"' task-definition.json > new-task-definition.json
           
-          # Handle different statuses
-          case "$status" in
-            "CREATED"|"IN_PROGRESS")
-              echo "Stopping deployment: $DEPLOYMENT_ID"
-              aws deploy stop-deployment \
-                --deployment-id "$DEPLOYMENT_ID" \
-                --auto-rollback-enabled
-              ;;
-            "SUCCEEDED")
-              echo "Deployment $DEPLOYMENT_ID already completed successfully"
-              ;;
-            "STOPPED"|"FAILED")
-              echo "Deployment $DEPLOYMENT_ID is in terminal state: $status"
-              ;;
-          esac
-        done
-      else
-        echo "No deployments found with status: $status"
-      fi
-    }
-    
-    # Process deployments for each status
-    for STATUS in "${STATUSES[@]}"; do
-      process_deployments "$STATUS"
-    done
+          # Register new task definition version
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family s3App-task \
+            --requires-compatibilities FARGATE \
+            --network-mode awsvpc \
+            --cpu 2048 \
+            --memory 4096 \
+            --execution-role-arn $(jq -r '.executionRoleArn' task-definition.json) \
+            --task-role-arn $(jq -r '.taskRoleArn' task-definition.json) \
+            --container-definitions "$(jq '.containerDefinitions' new-task-definition.json)" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "task_definition_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
 
-- name: Trigger CodeDeploy Deployment
-  run: |
-    # Add a small delay to ensure previous deployments are processed
-    sleep 10
+      - name: Create AppSpec file
+        run: |
+          cat > appspec.yaml << 'EOF'
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: "${TASK_DEF_ARN}"
+                  LoadBalancerInfo:
+                    ContainerName: "s3App-container"
+                    ContainerPort: 3000
+                  PlatformVersion: "LATEST"
+          EOF
+          
+          # Replace placeholder with actual task definition ARN
+          sed -i "s|\${TASK_DEF_ARN}|${{ steps.task-def.outputs.task_definition_arn }}|g" appspec.yaml
+          
+          # Print AppSpec for debugging
+          cat appspec.yaml
 
-    # Create new deployment
-    DEPLOYMENT_ID=$(aws deploy create-deployment \
-      --application-name ${{ env.CODEDEPLOY_APP }} \
-      --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
-      --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
-      --description "Automated Blue/Green Deployment - $(date '+%Y-%m-%d %H:%M:%S')" \
-      --query 'deploymentId' \
-      --output text)
-
-    echo "Started new deployment: $DEPLOYMENT_ID"
-
-    # Monitor deployment
-    DEPLOYMENT_STATUS=""
-    MAX_ATTEMPTS=30
-    ATTEMPT=0
-
-    while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-      DEPLOYMENT_STATUS=$(aws deploy get-deployment \
-        --deployment-id "$DEPLOYMENT_ID" \
-        --query 'deploymentInfo.status' \
-        --output text)
-
-      echo "Deployment status (Attempt $((ATTEMPT+1))): $DEPLOYMENT_STATUS"
-
-      # Check for terminal states
-      case "$DEPLOYMENT_STATUS" in
-        "SUCCEEDED")
-          echo "Deployment completed successfully"
-          break
-          ;;
-        "FAILED"|"STOPPED")
-          echo "Deployment failed or stopped"
-          exit 1
-          ;;
-        "IN_PROGRESS")
-          sleep 30
-          ;;
-        *)
-          echo "Unexpected deployment status: $DEPLOYMENT_STATUS"
-          exit 1
-          ;;
-      esac
-
-      ATTEMPT=$((ATTEMPT+1))
-    done
-
-    if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-      echo "Deployment monitoring timed out"
-      exit 1
-    fi
+      - name: Start CodeDeploy Deployment
+        run: |
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name s3App-application \
+            --deployment-group-name s3App-deployment-group \
+            --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
+            --description "Automated deployment via GitHub Actions" \
+            --query 'deploymentId' \
+            --output text)
+          
+          echo "Started deployment: $DEPLOYMENT_ID"
+          
+          # Monitor deployment - don't wait for completion to avoid GitHub Action timeouts
+          aws deploy get-deployment --deployment-id $DEPLOYMENT_ID
+          
+          echo "Deployment ID: $DEPLOYMENT_ID"
+          echo "Monitor the deployment progress in AWS CodeDeploy console"
