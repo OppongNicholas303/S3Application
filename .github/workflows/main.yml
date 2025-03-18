@@ -83,138 +83,129 @@ jobs:
           
       - name: Get or create execution role
         run: |
-          # Try to get execution role from CloudFormation outputs
-          EXECUTION_ROLE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='EcsTaskExecutionRole'].OutputValue" --output text)
+          # Attempt to get execution role from CloudFormation outputs
+          EXECUTION_ROLE=$(aws cloudformation describe-stacks \
+            --stack-name $STACK_NAME \
+            --query "Stacks[0].Outputs[?OutputKey=='EcsTaskExecutionRole'].OutputValue" \
+            --output text)
           
+          # If no role found in CloudFormation, look for existing role
           if [ -z "$EXECUTION_ROLE" ] || [ "$EXECUTION_ROLE" = "None" ]; then
-            echo "No execution role found in CloudFormation. Looking for existing ecsTaskExecutionRole..."
+            echo "No execution role found in CloudFormation. Searching for existing role..."
             
-            # Try to find the default ECS task execution role
-            EXECUTION_ROLE=$(aws iam list-roles --query "Roles[?RoleName=='ecsTaskExecutionRole'].Arn" --output text)
+            # Check for existing ecsTaskExecutionRole
+            EXISTING_ROLE=$(aws iam list-roles \
+              --query "Roles[?RoleName=='ecsTaskExecutionRole'].Arn" \
+              --output text)
             
-            if [ -z "$EXECUTION_ROLE" ] || [ "$EXECUTION_ROLE" = "None" ]; then
-              echo "Creating new execution role..."
+            if [ -n "$EXISTING_ROLE" ] && [ "$EXISTING_ROLE" != "None" ]; then
+              EXECUTION_ROLE=$EXISTING_ROLE
+              echo "Found existing ecsTaskExecutionRole: $EXECUTION_ROLE"
+            else
+              echo "Creating new ECS task execution role..."
               
-              # Create task execution role
-              cat > execution-role-policy.json <<EOF
-              {
-                "Version": "2012-10-17",
-                "Statement": [
-                  {
-                    "Effect": "Allow",
-                    "Principal": {
-                      "Service": "ecs-tasks.amazonaws.com"
-                    },
-                    "Action": "sts:AssumeRole"
-                  }
-                ]
-              }
-              EOF
+              # Create role policy document
+              cat > execution-role-trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ecs-tasks.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
               
+              # Create the role
               EXECUTION_ROLE=$(aws iam create-role \
                 --role-name ecsTaskExecutionRole \
-                --assume-role-policy-document file://execution-role-policy.json \
-                --query 'Role.Arn' --output text)
-                
-              # Attach the required policies
+                --assume-role-policy-document file://execution-role-trust-policy.json \
+                --query 'Role.Arn' \
+                --output text)
+              
+              # Attach necessary policies
               aws iam attach-role-policy \
                 --role-name ecsTaskExecutionRole \
                 --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-                
+              
               aws iam attach-role-policy \
                 --role-name ecsTaskExecutionRole \
                 --policy-arn arn:aws:iam::aws:policy/AmazonECR-FullAccess
             fi
           fi
           
-          echo "Using execution role: $EXECUTION_ROLE"
+          # Ensure we have a valid execution role
+          if [ -z "$EXECUTION_ROLE" ] || [ "$EXECUTION_ROLE" = "None" ]; then
+            echo "Failed to obtain or create execution role"
+            exit 1
+          fi
+          
+          echo "Execution Role: $EXECUTION_ROLE"
           echo "EXECUTION_ROLE=$EXECUTION_ROLE" >> $GITHUB_ENV
       
       - name: Create new task definition
         id: register-task-def
         run: |
-          # Create container definition without logging if role is not available
-          if [ -z "$EXECUTION_ROLE" ] || [ "$EXECUTION_ROLE" = "None" ]; then
-            echo '{
-              "name": "S3AppContainer",
-              "image": "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}",
-              "essential": true,
-              "portMappings": [
-                {
-                  "containerPort": 3000,
-                  "hostPort": 3000,
-                  "protocol": "tcp"
-                }
-              ]
-            }' > container-def.json
-          else
-            # With logging if we have an execution role
-            echo '{
-              "name": "S3AppContainer",
-              "image": "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}",
-              "essential": true,
-              "portMappings": [
-                {
-                  "containerPort": 3000,
-                  "hostPort": 3000,
-                  "protocol": "tcp"
-                }
-              ],
-              "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                  "awslogs-group": "/ecs/${{ env.TASK_FAMILY }}",
-                  "awslogs-region": "${{ env.AWS_REGION }}",
-                  "awslogs-stream-prefix": "ecs",
-                  "awslogs-create-group": "true"
-                }
-              }
-            }' > container-def.json
-          fi
+          # Prepare container definition
+          cat > container-def.json << EOF
+{
+  "name": "S3AppContainer",
+  "image": "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}",
+  "essential": true,
+  "portMappings": [
+    {
+      "containerPort": 3000,
+      "hostPort": 3000,
+      "protocol": "tcp"
+    }
+  ],
+  "logConfiguration": {
+    "logDriver": "awslogs",
+    "options": {
+      "awslogs-group": "/ecs/${{ env.TASK_FAMILY }}",
+      "awslogs-region": "${{ env.AWS_REGION }}",
+      "awslogs-stream-prefix": "ecs",
+      "awslogs-create-group": "true"
+    }
+  }
+}
+EOF
           
-          # Create CloudWatch logs group if using logs
-          if [ ! -z "$EXECUTION_ROLE" ] && [ "$EXECUTION_ROLE" != "None" ]; then
-            aws logs create-log-group --log-group-name "/ecs/$TASK_FAMILY" || echo "Log group already exists"
-          fi
+          # Create CloudWatch logs group
+          aws logs create-log-group --log-group-name "/ecs/$TASK_FAMILY" || true
           
-          # Register the task definition with or without execution role
-          if [ -z "$EXECUTION_ROLE" ] || [ "$EXECUTION_ROLE" = "None" ]; then
-            # Without execution role
-            NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-              --family $TASK_FAMILY \
-              --requires-compatibilities FARGATE \
-              --network-mode awsvpc \
-              --cpu 1024 \
-              --memory 2048 \
-              --container-definitions "[$(cat container-def.json)]" \
-              --query 'taskDefinition.taskDefinitionArn' --output text)
-          else
-            # With execution role
-            NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-              --family $TASK_FAMILY \
-              --requires-compatibilities FARGATE \
-              --network-mode awsvpc \
-              --cpu 1024 \
-              --memory 2048 \
-              --execution-role-arn "$EXECUTION_ROLE" \
-              --container-definitions "[$(cat container-def.json)]" \
-              --query 'taskDefinition.taskDefinitionArn' --output text)
-          fi
+          # Register task definition
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --family $TASK_FAMILY \
+            --requires-compatibilities FARGATE \
+            --network-mode awsvpc \
+            --cpu 1024 \
+            --memory 2048 \
+            --execution-role-arn "$EXECUTION_ROLE" \
+            --container-definitions file://container-def.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
           
           echo "TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
 
       - name: Generate AppSpec file
         run: |
-          echo 'version: 0.0
-          Resources:
-            - TargetService:
-                Type: AWS::ECS::Service
-                Properties:
-                  TaskDefinition: "'$TASK_DEF_ARN'"
-                  LoadBalancerInfo:
-                    ContainerName: "S3AppContainer"
-                    ContainerPort: 3000
-                  PlatformVersion: "LATEST"' > appspec.yaml
+          cat > appspec.yaml << EOF
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "$TASK_DEF_ARN"
+        LoadBalancerInfo:
+          ContainerName: "S3AppContainer"
+          ContainerPort: 3000
+        PlatformVersion: "LATEST"
+EOF
           
           cat appspec.yaml
 
@@ -225,7 +216,8 @@ jobs:
             --deployment-group-name $DEPLOYMENT_GROUP \
             --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
             --description "Automated deployment via GitHub Actions" \
-            --query 'deploymentId' --output text)
+            --query 'deploymentId' \
+            --output text)
 
           echo "Started deployment: $DEPLOYMENT_ID"
           aws deploy get-deployment --deployment-id $DEPLOYMENT_ID
