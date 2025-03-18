@@ -10,6 +10,7 @@ env:
   INFRASTRUCTURE_REPO: OppongNicholas303/S3-Image-Application-Infrastructure    
   STACK_NAME: S3AppStack 
   SERVICE_NAME: S3AppService
+  TASK_FAMILY: S3AppTask  # Added separate task family name
   CLUSTER_NAME: S3AppCluster
   DEPLOYMENT_GROUP: S3AppDeploymentGroup
   APPLICATION_NAME: S3AppCodeDeployApp
@@ -79,28 +80,75 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Register new ECS task definition
+          
+      - name: Check if task definition exists and create or update
         id: register-task-def
         run: |
-          # Fetch existing task definition
-          aws ecs describe-task-definition --task-definition $SERVICE_NAME --query taskDefinition > task-definition.json
-
-          # Update image in task definition
-          jq --arg IMAGE "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE' task-definition.json > new-task-def.json
-
-          # Register new task definition version
-          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --family $SERVICE_NAME \
-            --requires-compatibilities FARGATE \
-            --network-mode awsvpc \
-            --cpu 2048 \
-            --memory 4096 \
-            --execution-role-arn $(jq -r '.executionRoleArn' task-definition.json) \
-            --task-role-arn $(jq -r '.taskRoleArn' task-definition.json) \
-            --container-definitions "$(jq '.containerDefinitions' new-task-def.json)" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
-
+          # Check if task definition exists
+          TASK_DEF_EXISTS="true"
+          aws ecs describe-task-definition --task-definition $TASK_FAMILY --query taskDefinition > task-definition.json || TASK_DEF_EXISTS="false"
+          
+          if [ "$TASK_DEF_EXISTS" = "true" ]; then
+            echo "Task definition exists, updating..."
+            # Update image in task definition
+            jq --arg IMAGE "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE' task-definition.json > new-task-def.json
+            
+            # Register new task definition version
+            NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+              --family $TASK_FAMILY \
+              --requires-compatibilities FARGATE \
+              --network-mode awsvpc \
+              --cpu 2048 \
+              --memory 4096 \
+              --execution-role-arn $(jq -r '.executionRoleArn' task-definition.json) \
+              --task-role-arn $(jq -r '.taskRoleArn' task-definition.json) \
+              --container-definitions "$(jq '.containerDefinitions' new-task-def.json)" \
+              --query 'taskDefinition.taskDefinitionArn' --output text)
+          else
+            echo "Task definition does not exist, creating new one..."
+            # Create a new task definition from scratch
+            cat > container-definition.json <<EOF
+            [
+              {
+                "name": "S3AppContainer",
+                "image": "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG",
+                "essential": true,
+                "portMappings": [
+                  {
+                    "containerPort": 3000,
+                    "hostPort": 3000,
+                    "protocol": "tcp"
+                  }
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/$TASK_FAMILY",
+                    "awslogs-region": "$AWS_REGION",
+                    "awslogs-stream-prefix": "ecs"
+                  }
+                }
+              }
+            ]
+            EOF
+            
+            # Get the ECS task execution role ARN from CloudFormation stack
+            EXECUTION_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='EcsTaskExecutionRole'].OutputValue" --output text)
+            TASK_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs[?OutputKey=='EcsTaskRole'].OutputValue" --output text || echo "$EXECUTION_ROLE_ARN")
+            
+            # Register new task definition
+            NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+              --family $TASK_FAMILY \
+              --requires-compatibilities FARGATE \
+              --network-mode awsvpc \
+              --cpu 2048 \
+              --memory 4096 \
+              --execution-role-arn "$EXECUTION_ROLE_ARN" \
+              --task-role-arn "$TASK_ROLE_ARN" \
+              --container-definitions file://container-definition.json \
+              --query 'taskDefinition.taskDefinitionArn' --output text)
+          fi
+          
           echo "TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
 
       - name: Generate AppSpec file
@@ -118,7 +166,6 @@ jobs:
                   PlatformVersion: "LATEST"
           EOF
           
-          sed -i "s|\${TASK_DEF_ARN}|${{ env.TASK_DEF_ARN }}|g" appspec.yaml
           cat appspec.yaml
 
       - name: Deploy to ECS using AWS CodeDeploy
