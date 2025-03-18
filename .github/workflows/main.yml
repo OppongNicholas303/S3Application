@@ -111,8 +111,8 @@ jobs:
     - name: Start CodeDeploy Deployment
       run: |
         DEPLOYMENT_ID=$(aws deploy create-deployment \
-          --application-name s3App-application \
-          --deployment-group-name s3App-deployment-group \
+          --application-name S3AppStack-CodeDeployApplication-zCzfanSaXm8Y \
+          --deployment-group-name S3AppStack-CodeDeployGroup-43HD4TAY3AUK \
           --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
           --description "Automated deployment via GitHub Actions" \
           --query 'deploymentId' \
