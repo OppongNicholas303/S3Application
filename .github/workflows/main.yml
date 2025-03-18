@@ -11,6 +11,8 @@ env:
   ECS_CLUSTER: s3AppCluster
   ECS_SERVICE: s3App-service
   TASK_FAMILY: s3App-task
+  CODEDEPLOY_APP: s3App-application
+  CODEDEPLOY_GROUP: s3App-deployment-group
 
 jobs:
   build-and-push:
@@ -52,18 +54,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Prepare Blue/Green Deployment
+      - name: Prepare Task Definition
         run: |
-          # Describe current service to get current task definition
-          CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
-            --query 'services[0].taskDefinition' \
-            --output text)
-
-          # Get full task definition details
+          # Retrieve current task definition
           aws ecs describe-task-definition \
-            --task-definition $CURRENT_TASK_DEF \
+            --task-definition ${{ env.TASK_FAMILY }} \
             --query 'taskDefinition' > current-task-def.json
 
           # Create new task definition with updated image
@@ -74,35 +69,83 @@ jobs:
             --cpu 2048 \
             --memory 4096 \
             --execution-role-arn $(jq -r '.executionRoleArn' current-task-def.json) \
+            --task-role-arn $(jq -r '.taskRoleArn' current-task-def.json) \
             --container-definitions "[{
               \"name\": \"s3App-container\",
               \"image\": \"${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}\",
               \"essential\": true,
               \"portMappings\": [{
                 \"containerPort\": 3000,
-                \"hostPort\": 3000
-              }]
+                \"hostPort\": 3000,
+                \"protocol\": \"tcp\"
+              }],
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"/ecs/${{ env.TASK_FAMILY }}\",
+                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                  \"awslogs-stream-prefix\": \"ecs\"
+                }
+              }
             }]" \
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
 
           echo "NEW_TASK_DEF=$NEW_TASK_DEF" >> $GITHUB_ENV
 
-      - name: Perform Blue/Green Deployment
+      - name: Create AppSpec File
         run: |
-          # Create a new service or update existing with blue/green deployment
-          aws ecs update-service \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --service ${{ env.ECS_SERVICE }} \
-            --task-definition ${{ env.NEW_TASK_DEF }} \
-            --deployment-configuration maximumPercent=200,minimumHealthyPercent=50
+          cat > appspec.yaml << EOF
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: "${{ env.NEW_TASK_DEF }}"
+                  LoadBalancerInfo:
+                    ContainerName: "s3App-container"
+                    ContainerPort: 3000
+                  PlatformVersion: "LATEST"
+          EOF
+
+          cat appspec.yaml
+
+      - name: Trigger CodeDeploy Deployment
+        run: |
+          # Stop any existing deployments
+          ACTIVE_DEPLOYMENTS=$(aws deploy list-deployments \
+            --application-name ${{ env.CODEDEPLOY_APP }} \
+            --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
+            --include-only-statuses CREATED IN_PROGRESS \
+            --query 'deployments' \
+            --output text)
+
+          for DEPLOYMENT_ID in $ACTIVE_DEPLOYMENTS; do
+            echo "Stopping deployment: $DEPLOYMENT_ID"
+            aws deploy stop-deployment --deployment-id $DEPLOYMENT_ID
+          done
+
+          # Create new deployment
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name ${{ env.CODEDEPLOY_APP }} \
+            --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
+            --revision revisionType=AppSpecContent,appSpecContent="{content='$(cat appspec.yaml)'}" \
+            --description "Automated Blue/Green Deployment" \
+            --query 'deploymentId' \
+            --output text)
+
+          echo "Started deployment: $DEPLOYMENT_ID"
+          
+          # Wait for deployment to complete or timeout
+          DEPLOYMENT_STATUS=$(aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID || echo "FAILED")
+          
+          if [ "$DEPLOYMENT_STATUS" == "FAILED" ]; then
+            echo "Deployment failed"
+            exit 1
+          fi
 
       - name: Verify Deployment
         run: |
-          # Wait for deployment to complete
-          aws ecs wait services-stable \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }}
-
-          # Optional: Run health checks or additional verification
+          # Additional verification steps
+          aws deploy get-deployment --deployment-id $DEPLOYMENT_ID
           echo "Deployment completed successfully!"
