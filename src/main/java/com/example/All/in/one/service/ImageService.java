@@ -1,7 +1,6 @@
 package com.example.All.in.one.service;
 
 import com.example.All.in.one.model.ImageItem;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
@@ -65,13 +64,16 @@ public class ImageService {
      */
     public Page<ImageItem> listImages(int page, int size) {
         try {
+            // Request all objects (in production, you'd use continuation tokens for large buckets)
             ListObjectsV2Request request = ListObjectsV2Request.builder()
                     .bucket(bucketName)
+                    .maxKeys(1000) // Increase this for larger buckets
                     .build();
 
             ListObjectsV2Response response = s3Client.listObjectsV2(request);
             List<S3Object> objects = response.contents();
 
+            // Filter and transform to ImageItems
             List<ImageItem> images = objects.stream()
                     .filter(obj -> isImageFile(obj.key()))
                     .map(obj -> {
@@ -83,21 +85,26 @@ public class ImageService {
                         item.setLastModified(obj.lastModified());
                         return item;
                     })
+                    // Sort by last modified date (newest first)
+                    .sorted((a, b) -> b.getLastModified().compareTo(a.getLastModified()))
                     .collect(Collectors.toList());
 
-            // Manual pagination
+            // Create pageable and calculate bounds
             Pageable pageable = PageRequest.of(page, size);
             int start = (int) pageable.getOffset();
             int end = Math.min((start + pageable.getPageSize()), images.size());
 
-            if (start > images.size()) {
+            // Handle edge case where page is out of bounds
+            if (start >= images.size()) {
                 return new PageImpl<>(new ArrayList<>(), pageable, images.size());
             }
 
-            return new PageImpl<>(images.subList(start, end), pageable, images.size());
+            // Return the page slice
+            List<ImageItem> pageContent = images.subList(start, end);
+            return new PageImpl<>(pageContent, pageable, images.size());
 
         } catch (Exception e) {
-            log.error("Error listing images", e);
+            log.error("Error listing images: {}", e.getMessage(), e);
             return Page.empty();
         }
     }
@@ -106,12 +113,18 @@ public class ImageService {
      * Delete an image from S3
      */
     public void deleteImage(String key) {
-        DeleteObjectRequest request = DeleteObjectRequest.builder()
-                .bucket(bucketName)
-                .key(key)
-                .build();
+        try {
+            DeleteObjectRequest request = DeleteObjectRequest.builder()
+                    .bucket(bucketName)
+                    .key(key)
+                    .build();
 
-        s3Client.deleteObject(request);
+            s3Client.deleteObject(request);
+            log.info("Successfully deleted image with key: {}", key);
+        } catch (Exception e) {
+            log.error("Error deleting image with key {}: {}", key, e.getMessage(), e);
+            throw e;
+        }
     }
 
     /**

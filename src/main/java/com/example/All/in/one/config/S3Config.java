@@ -20,7 +20,7 @@ public class S3Config {
                 .region(Region.of(awsRegion))
                 .build();  // Use the default credentials provider chain
     }
-
+//
 //    @Bean
 //    public S3Client s3Client() {
 //        return S3Client.builder()

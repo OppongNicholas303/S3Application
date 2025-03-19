@@ -20,15 +20,8 @@ body {
 }
 
 /* Image Cards */
-.image-card {
-    height: 100%;
-    max-height: 400px; /* Maximum height for the entire card */
-    display: flex;
-    flex-direction: column;
-}
-
 .image-card .card-img-container {
-    height: 180px; /* Fixed height for image container */
+    height: 200px;
     overflow: hidden;
     display: flex;
     align-items: center;
@@ -38,30 +31,16 @@ body {
 
 .image-card img {
     max-height: 100%;
-    max-width: 100%;
     object-fit: contain;
-}
-
-.image-card .card-body {
-    flex: 0 1 auto; /* Don't allow card body to grow */
-    overflow: hidden;
 }
 
 .image-card .card-title {
     font-size: 0.9rem;
     font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
 
 .image-card .card-text {
     font-size: 0.8rem;
-}
-
-.image-card .card-footer {
-    padding: 0.5rem 1rem;
-    flex: 0 0 auto; /* Don't allow footer to grow or shrink */
 }
 
 /* Pagination */
@@ -83,11 +62,6 @@ body {
     text-align: center;
 }
 
-#imagePreview {
-    max-height: 200px !important;
-    max-width: 100% !important;
-}
-
 /* Animation for Image Cards */
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(20px); }
@@ -96,7 +70,6 @@ body {
 
 #imageGallery .col-md-4 {
     animation: fadeIn 0.5s ease-out forwards;
-    margin-bottom: 20px; /* Ensure consistent spacing */
 }
 
 #imageGallery .col-md-4:nth-child(2) { animation-delay: 0.1s; }
@@ -105,33 +78,9 @@ body {
 #imageGallery .col-md-4:nth-child(5) { animation-delay: 0.4s; }
 #imageGallery .col-md-4:nth-child(6) { animation-delay: 0.5s; }
 
-/* Gallery Container */
-#imageGallery {
-    max-height: calc(100vh - 350px); /* Adjust based on other elements */
-    overflow-y: auto; /* Enable vertical scrolling within the gallery if needed */
-}
-
 /* Responsive adjustments */
 @media (max-width: 768px) {
     .image-card .card-img-container {
-        height: 140px;
-    }
-
-    .image-card {
-        max-height: 350px;
-    }
-
-    #imageGallery {
-        max-height: calc(100vh - 300px);
-    }
-}
-
-@media (max-width: 576px) {
-    .image-card .card-img-container {
-        height: 120px;
-    }
-
-    .image-card {
-        max-height: 300px;
+        height: 150px;
     }
 }
